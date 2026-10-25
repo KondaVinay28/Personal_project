@@ -60,12 +60,23 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Validate deployment configuration
+        run: |
+          missing=""
+          [ -z "${{ vars.AWS_ROLE_ARN }}" ] && missing="${missing} AWS_ROLE_ARN"
+          [ -z "${{ vars.EC2_INSTANCE_ID }}" ] && missing="${missing} EC2_INSTANCE_ID"
+          [ -z "${{ vars.ARTIFACT_BUCKET }}" ] && missing="${missing} ARTIFACT_BUCKET"
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing required GitHub repository variables for deployment:${missing}."
+            echo "::notice::Deploy Terraform in infra/terraform and configure the outputs in Settings -> Secrets and variables -> Actions -> Variables."
+            exit 1
+          fi
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-          # aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Build and package release image
         run: |
