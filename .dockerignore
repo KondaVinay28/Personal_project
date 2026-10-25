@@ -1,0 +1,12 @@
+.git
+.github
+.terraform
+infra
+tests
+scripts
+__pycache__
+*.py[cod]
+*.tfstate*
+*.tfvars
+release.tar
+image.tar

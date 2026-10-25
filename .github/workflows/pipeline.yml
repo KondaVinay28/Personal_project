@@ -1,0 +1,119 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-scan:
+    name: Test and scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Docker image
+        run: docker build --tag personal-project:${{ github.sha }} .
+
+      - name: Check SonarQube configuration
+        id: sonar-config
+        env:
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [[ -n "${SONAR_HOST_URL}" && -n "${SONAR_TOKEN}" ]]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Run SonarQube analysis
+        if: steps.sonar-config.outputs.enabled == 'true'
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  deploy:
+    name: Deploy to EC2
+    needs: test-and-scan
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Build and package release image
+        run: |
+          docker build --tag "personal-project:${GITHUB_SHA}" .
+          docker save --output image.tar "personal-project:${GITHUB_SHA}"
+          tar -cf release.tar image.tar scripts/deploy-ec2.sh
+
+      - name: Upload release to S3
+        run: |
+          aws s3 cp release.tar \
+            "s3://${{ vars.ARTIFACT_BUCKET }}/releases/${GITHUB_SHA}.tar"
+
+      - name: Deploy release through Systems Manager
+        env:
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+        run: |
+          set -euo pipefail
+          COMMAND=$(cat <<EOF
+          set -eu
+          RELEASE_DIR="/tmp/personal-project-${GITHUB_SHA}"
+          trap 'rm -rf -- "\${RELEASE_DIR}" /tmp/personal-project-release.tar' EXIT
+          mkdir -p "\${RELEASE_DIR}"
+          aws s3 cp "s3://${ARTIFACT_BUCKET}/releases/${GITHUB_SHA}.tar" /tmp/personal-project-release.tar
+          tar -xf /tmp/personal-project-release.tar -C "\${RELEASE_DIR}"
+          bash "\${RELEASE_DIR}/scripts/deploy-ec2.sh" "${GITHUB_SHA}" "\${RELEASE_DIR}"
+          EOF
+          )
+          PARAMETERS=$(jq -cn --arg command "${COMMAND}" '{commands: [$command]}')
+          COMMAND_ID=$(aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --instance-ids "${INSTANCE_ID}" \
+            --comment "Deploy ${GITHUB_SHA}" \
+            --parameters "${PARAMETERS}" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          if ! aws ssm wait command-executed \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}"; then
+            aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --output json
+            exit 1
+          fi
+
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --query 'StandardOutputContent' \
+            --output text

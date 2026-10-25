@@ -1,0 +1,10 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+__pycache__/
+*.py[cod]
+.coverage
+release.tar
+image.tar
