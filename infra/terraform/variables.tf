@@ -13,6 +13,7 @@ variable "instance_type" {
 variable "github_repository" {
   description = "GitHub repository allowed to deploy, in owner/repository format."
   type        = string
+  default = "KondaVinay28/Personal_project"
 
   validation {
     condition     = can(regex("^[^/]+/[^/]+$", var.github_repository))
